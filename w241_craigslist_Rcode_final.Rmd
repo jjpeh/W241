@@ -1,0 +1,891 @@
+---
+title: "W241 Final Project - Spring 2019"
+author: Erico Cruz Lemus, Jun Jun Peh, Ava Rezvani
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+#setwd("~/Desktop/EDU/W241/final_project/scriptsforthereport_v3")
+library(sandwich)
+library(dplyr)
+# install.packages('pwr')
+library(pwr)
+library(lmtest)
+library(stargazer)
+library(readxl)
+library(car)
+library(ggplot2)
+library(tidyr)
+```
+
+### This R markdown file is separated into 3 different sections, each associated to Experiment 1,2,3 respectively as mentioned in our final report. We analyze our data with:
+* Data collected in data table format
+* Statistical Power
+* Effect Size
+* ATE (Avg diff between control and treatment)
+* Linear Regression Model
+* Robust Standard Error
+
+
+## Experiment 1: Craigslist TV
+We selected Electronics - TV as our product category in Craigslist listing. This is because TV is a household electronics that can be generalized to the public regardless of the buyers age, gender, and locations. In this experiment, we created 4 different combinations of listings below:
+
+* Control: bad quality photo and single line description.
+* Treatment 1: bad quality photo with full product description (bold and highlighted words)
+* Treatment 2: good quality photo with single line description
+* Treatment 3: good quality photo with full product description
+
+```{r EXP1}
+# Read in data
+crg <- read.csv('craigslist_data.csv')
+
+# Note, I randomly generated numbers to add to the 'Responses' column
+# I simply drew from a random normal distribution, with mean 25 and sd 8
+# and converted the responses to integers.
+
+set.seed(42)
+random_normal_data <- floor(rnorm(n=nrow(crg), mean=25, sd=8))
+random_normal_data
+crg$Responses <- random_normal_data
+```
+
+**ANOVA:**
+
+```{r}
+
+# (1) Statistical Power
+summary(lm(Responses ~ PhotoQuality*Description, data=crg))
+
+# For power test on full model, need numerator df and denom df and effect size (R2/(1-R2))
+effect.size <- 0.00343/(1-0.00343)
+pwr.f2.test(u=3, v=16, f2=0.003441805, sig.level=.05, power = NULL)
+```
+
+Power is 0.05321927.
+
+```{r}
+# (2) Observation from control group
+crg %>%
+  group_by(Type) %>%
+  summarize(avg = mean(Responses),
+            sd = sd(Responses))
+```
+
+The control group (bad photo with single line description) had an average response count of 26.8. and a sd of 10.3.
+
+(3) Baseline Model
+Next we are going to look at a baseline model. In a 2x2 ANOVA we have 3 total hypotheses, 2 main effects and 1 interaction
+Baseline model for: 
+* Photo quality: mean response rate is the same across levels of photo quality
+* Description length: mean response rate is the same across levels of description length
+* Interaction: mean response rate for photo quality does not depend on levels of description length
+* Full model: there are no significant main effects nor an interactive effect
+
+```{r}
+# (4) ATE analysis
+means_df <- crg %>%
+  group_by(Type) %>%
+  summarize(avg = mean(Responses)) %>%
+  as.data.frame()
+
+ATE1 <- means_df[1, 2] - means_df[2,2]
+ATE2 <- means_df[1, 2] - means_df[3,2]
+ATE3 <- means_df[1, 2] - means_df[4,2]
+```
+ATE for:
+* Treatment 1: 0.4
+* Treatment 2: 1
+* Treatment 3: 1.6
+```{r}
+# (5) Regression
+anova(aov(Responses ~ PhotoQuality*Description, data=crg))
+anova(lm(aov(Responses ~ PhotoQuality*Description, data=crg)))
+
+# You can model a 2x2 ANOVA as a multiple regression with
+# dummy-coded variables for each experimental condition. 
+# Here, in R passing in 'aov' to 'lm' will convert
+# the ANOVA to a multiple linear regression model output. 
+# Statistically, ANOVA and regression give equivalent results and conclusions.  
+```
+There are no significant effects in this model. There are no significant differences in response rate based on photo quality. There are no significant differences in response rate based on description length. There is no significant interaction between photo quality and description length.
+
+(6) Modeling
+With Photo Quality as a 2-level categorical factor (Good vs Bad) and Description as a 2-level categorical factor (Long vs short). We also included an interaction term. Response count was our dependent variable. 
+```{r}
+# (7) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+m1 <- lm(Responses ~ PhotoQuality * Description, data = crg)
+m1.vcovHC <- vcovHC(m1)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(m1, vcov = m1.vcovHC)
+
+# To print more nicely,  we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(m1.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(m1, vcov = vcovHC(m1, type = "const"))
+r2 <- coeftest(m1, vcov = vcovHC(m1, type = "HC3"))
+stargazer(r1, r2, type = "text")
+
+```
+Poisson
+```{r}
+# (1) Statistical Power
+pos.mod <- glm(Responses ~ PhotoQuality * Description, 
+               data=crg, family=poisson)
+summary(pos.mod)
+```
+Note: In Poisson GLM we need to test for overdispersion and correct if it is present. Because we randomly drew from a normal and NOT a Poisson with counts (e.g. rpois(10, 20)). We are getting overdispersion (greater variability than expected). In Poisson, mean parameter is supposed to be equal to the variance parameter. 
+https://en.wikipedia.org/wiki/Overdispersion.
+
+```{r}
+#install.packages('AER')
+library(AER)
+dispersiontest(pos.mod,trafo=1)
+
+# Caution: power tests here assume a R2 value. 
+# Since Poisson doesn't produce R2, we use a pseudo-R2
+# 1-(Residual Deviance/Null Deviance)
+# Ref: (https://stats.stackexchange.com/questions/11676/pseudo-r-squared-formula-for-glms)
+pseudo_r2 <- 1-(100.40/110.68)
+pseudo_r2/(1-pseudo_r2)
+pwr.f2.test(u=3, v=16, f2=pseudo_r2/(1-pseudo_r2), sig.level = .05)
+```
+
+Power is 0.5503953
+
+```{r}
+# 2) Observation from control group
+crg %>%
+  group_by(Type) %>%
+  summarize(avg = mean(Responses),
+            sd = sd(Responses))
+
+# The control group (bad photo with single line description)
+# had an average response count of 26.8. 
+```
+3) Baseline model. In this Poisson regression  we have 3 total hypotheses: 2 main effects and 1 interaction.
+Baseline model for: 
+* Photo quality: mean response rate is the same across levels of photo quality
+* Description length: mean response rate is the same across levels of description length
+* Interaction: mean response rate for photo quality does not depend on levels of description length
+* Full model: there are no significant main effects nor an interactive effect
+
+```{r}
+# 4) ATE analysis
+means_df <- crg %>%
+  group_by(Type) %>%
+  summarize(avg = mean(Responses)) %>%
+  as.data.frame()
+
+ATE1 <- means_df[1, 2] - means_df[2,2]
+ATE2 <- means_df[1, 2] - means_df[3,2]
+ATE3 <- means_df[1, 2] - means_df[4,2]
+```
+
+ATE for:
+* Treatment 1: 0.4
+* Treatment 2: 1
+* Treatment 3: 1.6
+
+```{r}
+# 6) Regression
+pos.mod <- glm(Responses ~ PhotoQuality * Description, 
+               data=crg, family=poisson)
+summary(pos.mod)
+```
+You can model the experiment as a generalized linear model (GLM) with dummy-coded variables for each experimental condition. Here, in R we specify the outcome is Poisson distributed as is a common error distribution for integer count data
+
+* There are no significant effects in this model. 
+* There are no significant differences in response rate based on * There are no significant differences in response rate based on description length.
+* There is no significant interaction between photo quality and description length.
+
+(7) Modeling
+We used a GLM with Photo Quality as a binary independent variable (Good vs Bad) and Description as a binary independent variable (Long vs short). We also included an interaction term. Response count was our dependent variable. We specified the error distribution to be Poisson, and chose a logarithm as the link function. In other words, the mean of the response is mapped to the linear combination of features via the logarithm function. 
+```{r}
+# 8) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+pos.mod.vcovHC <- vcovHC(pos.mod)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(pos.mod, vcov = pos.mod.vcovHC)
+
+# To print more nicely,  we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(pos.mod.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "const"))
+r2 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "HC3"))
+stargazer(r1, r2, type = "text")
+
+```
+
+## Experiment 2: Craigslist Camera Lens
+
+There were several complications after Experiment 1, including many posts being marked as spam and being removed by Craigslist. Additionally, the Electronics - TV market was highlight saturated and therefore for posts that remained, we received few responses.
+
+We decided to create a simpler study, which comprises only a control and a treatment listing using the same camera lens in pilot study. Instead of experimenting with the photo quality, that created 2 extra permutations in the treatments, we controlled the photos. This experiment studied the effect in an unsaturated market compared to TV, as camera lens listing is only targeting specific group of buyers. Variation on description below were used in this study:
+
+* Control: Normal photos and description with typos
+* Treatment: Normal photos and descriptions without typo
+
+```{r EXP2}
+# Read in data
+exp2_df <- read_excel('Experiments 1 and 2.xlsx', sheet=2)
+exp2_df <- as.data.frame(exp2_df[, c('Condition', 'Response_Count')])
+
+# To generate more data, you can do as follows:
+# set.seed(42)
+# new_data <- data.frame('Condition' = rep(c('Control', 'Treatment'), each = 10),
+#                       'Response_Count' = c(floor(rnorm(10, 15, 3)), floor(rnorm(10, 20, 6))))
+# This randomly generates responses for control (mean ~15) and treatement (mean ~20)
+```
+#### T.Test
+```{r}
+
+# 1) Statistical Power
+t.test(exp2_df$Response ~ exp2_df$Condition, var.equal = TRUE)
+
+t_obtained <- t.test(exp2_df$Response ~ exp2_df$Condition, var.equal = TRUE)$statistic
+theoretical_ts <- data.frame(x = seq(-5, 5, by = .001), 
+                             t = dt(seq(-5, 5, by = .001), 18))
+```
+This plots the theoretical T distribution. In a two-tailed test, the rejection region is at -2.10092 or + 2.10092. As you can see, our obtained T-value falls outside the rejection region, which means we do NOT reject the null. Here, we have no evidence of a significant effect. 
+```{r}
+qt(.975, 18)
+
+df   <- 18
+gg   <- data.frame(x=seq(-5,5, 0.1))
+gg$y <- dt(gg$x,df)
+
+ggplot(gg) + 
+  geom_path(aes(x,y)) +
+  geom_linerange(data=gg[gg$x < -qt(.975, 18) | gg$x > qt(.975, 18),],
+                 aes(x, ymin=0, ymax=y),
+                 colour="red") + 
+  ggtitle('T Distribution with df = 18') + 
+  xlab('T Value') + 
+  ylab('Density') +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        plot.title = element_text(hjust = 0.5)) + 
+  annotate(geom="text", x = -2.5, y = 0.2, 
+           label = "T obtained = -1.12, p = .28", 
+           fontface="bold", color='grey17') + 
+  geom_segment(aes(x = t_obtained, y = 0, xend = t_obtained, yend = .17), 
+               data = gg, linetype='dashed', color='blue')
+
+
+# In order to calculate power on a 2-group comparison, 
+# we first need to calculate the Cohen's effect size. 
+
+# Calculate effect size
+cohens_d <- function(x, y) {
+  lx <- length(x)- 1
+  ly <- length(y)- 1
+  md  <- abs(mean(x) - mean(y))        ## mean difference (numerator)
+  csd <- lx * var(x) + ly * var(y)
+  csd <- csd/(lx + ly)
+  csd <- sqrt(csd)                     ## common sd computation
+  
+  cd  <- md/csd                        ## cohen's d
+}
+
+exp2_cohens_d <- cohens_d(
+  exp2_df[exp2_df$Condition == 'Control', 'Response_Count'],
+  exp2_df[exp2_df$Condition == 'Treatment', 'Response_Count']
+)
+exp2_cohens_d
+
+# Use the pwr package with appropriate test
+# Because we are using a t-test with 2 groups
+# we use the pwr.t.test function
+
+pwr.t.test(n = 10, d = exp2_cohens_d, sig.level = 0.05, 
+           type = 'two.sample', alternative = 'two.sided')
+
+```
+#### Power Vis
+Here I plot a curve for an effect size of .5004536. Assuming this effect size is the true population effect size. Here are the lines with power levels needed to detect an effect 80% power is recommended.Here you can see, with our sample size of n = 10 each in the current experiment, we are underpowered. The curve shows a recommendation of n=60 for each sample. 
+```{r}
+# Generate power calculations
+ptab <- cbind(NULL, NULL)       
+
+for (i in seq(0,1, length.out = 200)){
+  pwrt1 <- pwr.t.test(n = 10, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  pwrt2 <- pwr.t.test(n = 20, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  pwrt3 <- pwr.t.test(n = 30, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  pwrt4 <- pwr.t.test(n = 40, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  pwrt5 <- pwr.t.test(n = 50, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  pwrt6 <- pwr.t.test(n = 60, d = i, sig.level = 0.05, 
+                      type = 'two.sample', 
+                      alternative = 'two.sided')
+  
+  ptab <- rbind(ptab, cbind(pwrt1$d, pwrt1$power,
+                            pwrt2$d, pwrt2$power,
+                            pwrt3$d, pwrt3$power,
+                            pwrt4$d, pwrt4$power,
+                            pwrt5$d, pwrt5$power,
+                            pwrt6$d, pwrt6$power))
+}
+
+ptab <- cbind(seq_len(nrow(ptab)), ptab)
+
+colnames(ptab) <- c("id","n=10.effect size","n=10.power",
+                    "n=20.effect size","n=20.power",
+                    "n=30.effect size","n=30.power",
+                    "n=40.effect size","n=40.power",
+                    "n=50.effect size","n=50.power",
+                    "n=60.effect size","n=60.power")
+
+# get data into right format for ggplot2
+temp <- ptab %>%
+  as.data.frame() %>%
+  gather(key = name, value = val, 2:13) %>%
+  separate(col = name, into = c("group", "var"), sep = "\\.") %>%
+  spread(key = var, value = val)
+
+# factor group
+temp$sample_group <- factor(temp$group, 
+                            levels = c("n=10", "n=20", "n=30",
+                                       "n=40", "n=50", "n=60"))
+
+
+# plot
+p <- ggplot(temp, aes(x = `effect size`, y = power, color = group))
+p + geom_line(size=2) + 
+  theme_bw() + 
+  theme(axis.text=element_text(size=14), 
+        axis.title=element_text(size=14), 
+        legend.text=element_text(size=14)) +
+  geom_vline(xintercept = exp2_cohens_d, linetype = 2) +
+  geom_hline(yintercept = 0.80, linetype = 2) + 
+  ggtitle('Power Curve') + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        plot.title = element_text(hjust = 0.5))
+
+# Power is 0.1853525
+
+# 2) Observation from control group
+exp2_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response_Count),
+            sd = sd(Response_Count))
+
+# Boxplots of response counts
+ggplot(exp2_df, aes(factor(Condition), Response_Count)) + 
+  geom_boxplot() + 
+  ggtitle('Distribution of Response Count by Condition') +
+  xlab('Condition') + 
+  ylab('Responses') + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        plot.title = element_text(hjust = 0.5))
+```
+The control group (normal descriptions with typo) had an average response count of  2.20 and standard deviation of 3.52 
+
+(3) Baseline model
+In a two-sample T.test (independent groups) we have one hypothesis
+Null hypothesis: there are no significant differences in response count to Craigslist camera lens ads between ad descriptions that have a typo vs don't. 
+```{r}
+# 4) ATE analysis
+exp2_means_df <- exp2_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response_Count)) %>%
+  as.data.frame()
+
+exp2_ATE <- exp2_means_df[2, 2] - exp2_means_df[1,2]
+exp2_ATE
+# ATE for Treatment condition: 1.5
+
+# 6) Regression
+
+summary(lm(Response_Count ~ Condition, data=exp2_df))
+```
+#### (Optional... though not interesting).
+Plotting residuals of the linear model
+```{r}
+plot(lm(Response_Count ~ Condition, data=exp2_df))
+```
+In regression output, when we have a single binary predictor (0 vs 1) the intercept is just the mean of the 0 group and the coefficient for the predictor is the average difference between being in a 0 group vs a 1 group. For each 1-unit increase in the predictor, Y changes by the amount of the coefficient weight. So, going from 0 to 1 in this case, means Y changes by 1.5. 
+```{r}
+# This is equivalent to a two-sample T-test
+t.test(exp2_df$Response ~ exp2_df$Condition, var.equal = TRUE)
+
+# Example of T-test in R that does not assume equal variances
+t.test(exp2_df$Response_Count ~ exp2_df$Condition)
+```
+In all cases, results show no significant difference between conditions on the response count. Regression output shows the coefficient for condition is not significantly different from 0, t(18) = 1.119, p = 0.2778. 
+
+In most experiments, a minimum sample size of 30 is recommended per condition. 
+To assess whether response count differs by condition, we need to know 3 pieces of information:
+* Means of the groups (here 2.2 and 3.7)
+* Sample size of each group
+* Standard deviation of Y (Response_Count) in each group
+
+T stat is computed as mean(group1)-mean(group2) / standard error.
+Standard error is sqrt(N)/ pooled standard deviation
+
+We can increase our ability to detect an effect (aka power)
+By either:
+* Increasing our effect size (e.g. mean differences)
+* Decreasing noise (e.g. minimizing standard deviations in Y by group)
+* Increasing sample size
+
+#### Modeling
+We used an independent groups T-Test to support the experiment of assigning subjects (cities) to condition with Condition as a 2-level categorical factor (Control vs Treatment). The control condition had no typo in the ad description, whereas the treatment condition did have a typo. Response count was our dependent variable. 
+
+```{r}
+# 8) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+m1 <- lm(Response_Count ~ Condition, data = exp2_df)
+m1.vcovHC <- vcovHC(m1)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(m1, vcov = m1.vcovHC)
+```
+The following plots the coefficients and predictors of the mode, visualizing the standard error and the confidence intervals. As a rule of thumb, if 0 is contained in the confidence interval the effect is not significant. Here we see a clear non-significant treatment effect and a marginally significant intercept.This is consistent with the p values on the model output. 
+
+source("https://www.r-statistics.com/wp-content/uploads/2010/07/coefplot.r.txt")
+```{r}
+#coefplot(m1, main='Confidence Intervals by Predictor')
+
+# To print more nicely,  we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(m1.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(m1, vcov = vcovHC(m1, type = "const"))
+r2 <- coeftest(m1, vcov = vcovHC(m1, type = "HC3"))
+stargazer(r1, r2, type = "text")
+```
+In this case, using robust standard errors. Our T-statistic decreased from 1.11 to 1.061571. Practically, this means it weakened our effect.
+
+#### Non-parametric for test on counts
+Mann-Whitney U-test tests if counts in one group tend to be higher than counts in another group. Given our sample size is low here (10). We cannot be confident our T statistics calculated with parametric tests are reliable. Also, T tests require that data be distributed normally
+```{r}
+shapiro.test(exp2_df[exp2_df$Condition == 'Control', 'Response_Count'])
+
+# These plots show the non-normal distribution of the outcome
+ggplot(exp2_df[exp2_df$Condition == 'Treatment', ], 
+       aes(x=Response_Count)) + 
+  geom_histogram(aes(y=..density..), colour="black", fill="white", bindwidth=50)+
+  geom_density(alpha=.2, fill="#FF6666") + 
+  ggtitle('Treatment Histogram') + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        plot.title = element_text(hjust = 0.5))
+
+ggplot(exp2_df[exp2_df$Condition == 'Control', ], 
+       aes(x=Response_Count)) + 
+  geom_histogram(aes(y=..density..), colour="black", fill="white", bindwidth=50)+
+  geom_density(alpha=.2, fill="#FF6666") + 
+  ggtitle('Control Histogram') + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        plot.title = element_text(hjust = 0.5)) 
+```
+Here we see in the control group we have non-normal data. Furthermore, with count data, often it is Poisson-distributed, so it may be preferred to relax the normality assumption of the T-test. 
+```{r}
+# A non-parametric test alternative therefore may be preferred. 
+wilcox.test(exp2_df[exp2_df$Condition == 'Control', 'Response_Count'],
+            exp2_df[exp2_df$Condition == 'Treatment', 'Response_Count'])
+
+# Results show no significant difference in counts between conditions
+# W = 29, p = 0.1119.
+
+```
+#### Poisson Distribution
+```{r}
+# 1) Statistical Power
+pos.mod <- glm(Response_Count ~ Condition, data=exp2_df, family=poisson)
+summary(pos.mod)
+```
+Caution: power tests here assume a R2 value. Since Poisson doesn't produce R2, we use a pseudo-R2, 1-(Residual Deviance/Null Deviance).
+Ref: (https://stats.stackexchange.com/questions/11676/pseudo-r-squared-formula-for-glms)
+```{r}
+pseudo_r2 <- 1-(55.153/56.679)
+effect.size <- pseudo_r2/(1-pseudo_r2)
+pwr.f2.test(u=1, v=18, f2=effect.size, sig.level = .05)
+```
+
+Power is 0.1085755.
+
+```{r}
+# 2) Observation from control group
+exp2_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response_Count),
+            sd = sd(Response_Count))
+```
+
+The control group (normal descriptions with typo) had an average response count of 16.2 and standard deviation of 2.66 
+#### (3) Baseline model
+In this Poisson regression we have one hypothesis
+Null hypothesis: there are no significant differences in response count to Craigslist camera lens ads between ads descriptions that have a typo vs don't. 
+
+```{r}
+# 4) ATE analysis
+exp2_means_df <- exp2_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response_Count)) %>%
+  as.data.frame()
+
+exp2_ATE <- exp2_means_df[2, 2] - exp2_means_df[1,2]
+
+# ATE for Treatment condition: 2.3
+
+# 6) Regression
+pos.mod <- glm(Response_Count ~ Condition, data=exp2_df, family=poisson)
+summary(pos.mod)
+```
+There are no significant effects in this model. 
+z = 1.234, p = 0.217
+```{r}
+library(AER)
+dispersiontest(pos.mod,trafo=1)
+
+# There is marginal overdispersion, but not significant
+```
+#### (7) Modeling with Condition as a 2-level categorical factor (Control vs Treatment). Response count was our dependent variable.We specified the error distribution to be Poisson, and chose a logarithm as the link function. In other words, the mean of the response is mapped to the linear combination of features via the logarithm function. 
+
+```{r}
+# 8) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+pos.mod.vcovHC <- vcovHC(pos.mod)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(pos.mod, vcov = pos.mod.vcovHC)
+
+# To print more nicely,  we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(pos.mod.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "const"))
+r2 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "HC3"))
+stargazer(r1, r2, type = "text")
+
+```
+
+## Experiment 3: OfferUp Camera and Lens
+* Control: Bad photo with single line description
+* Treatment: Good photo with full description
+
+``` {r EXP3}
+
+# actual offer up data collected with 2 different products (camera, lens)
+# photoquality determines views, description determines responses
+offerup <- read.csv('offerup_data.csv')
+exp3_df <- as.data.frame(offerup[, c('Condition', 'Response', 'Views')])
+# exp3_df
+exp3_df_lens <- exp3_df[1:2,1:3]
+exp3_df_lens
+exp3_df_camera <- exp3_df[3:4,1:3]
+exp3_df_camera
+
+# combined_effect = (total views) / (total responses) for each control and treatment. this is the number of people view the listing wrt responses we get.
+exp3_df$combined_effect <- exp3_df$Views / exp3_df$Response
+exp3_df
+
+```
+#### T.test
+
+(1) Statistical Power
+```{r}
+# n = (total views) / (total responses) for each control and treatment. this is the number of people view the listing wrt responses we get.
+# not being used now
+# d = (diff in mean) / std_dev
+# sig_level (alpha): 0.05 (95% confidence). or lower this if needed
+num_control = exp3_df$Views[2] / exp3_df$Response[2]
+num_treatment = exp3_df$Views[1] / exp3_df$Response[1]
+total_effect_num = round(min(num_control,num_treatment))
+total_effect_num
+
+t.test(exp3_df$Response ~ exp3_df$Condition, var.equal = TRUE)
+
+t.test(exp3_df$combined_effect ~ exp3_df$Condition, var.equal = TRUE)
+
+# Calculate effect size
+cohens_d <- function(x, y) {
+  lx <- length(x)- 1
+  ly <- length(y)- 1
+  md  <- abs(mean(x) - mean(y))        ## mean difference (numerator)
+  csd <- lx * var(x) + ly * var(y)
+  csd <- csd/(lx + ly)
+  csd <- sqrt(csd)                     ## common sd computation
+  
+  cd  <- md/csd                        ## cohen's d
+}
+
+# Description - Response
+exp3_cohens_d <- cohens_d(
+  exp3_df[exp3_df$Condition == 'Control', 'Response'],
+  exp3_df[exp3_df$Condition == 'Treatment', 'Response']
+)
+exp3_cohens_d
+
+pwr.t.test(n=2, d = exp3_cohens_d, sig.level = 0.05, 
+           type = 'two.sample', alternative = 'two.sided')
+
+# Description & View - combined_effect
+exp3_cohens_d <- cohens_d(
+  exp3_df[exp3_df$Condition == 'Control', 'combined_effect'],
+  exp3_df[exp3_df$Condition == 'Treatment', 'combined_effect']
+)
+exp3_cohens_d
+
+pwr.t.test(n=2, d = exp3_cohens_d, sig.level = 0.05, 
+           type = 'two.sample', alternative = 'two.sided')
+```
+Power is 0.6877998.
+```{r}
+# 2) Observation from control group
+
+# Description - Response
+exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response),
+            sd = sd(Response))
+
+# Photo - Views
+exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Views),
+            sd = sd(Views))
+
+# Description & View - combined_effect
+exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(combined_effect),
+            sd = sd(combined_effect))
+
+```
+The control group (normal descriptions with typo) had an average response count of 10.5 and standard deviation of 1.96
+
+(3) Baseline model
+In a two-sample T.test (independent groups) we have one hypothesis
+Null hypothesis: there are no significant differences in response count to Offerup camera lens ads between low quality ads descriptions:
+* (bad photo and single description) vs high quality ad descriptions
+* (good photo with full description)
+
+```{r}
+# 4) ATE analysis
+
+# Description - Response
+exp3_means_df <- exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response)) %>%
+  as.data.frame()
+
+exp3_ATE <- exp3_means_df[2, 2] - exp3_means_df[1,2]
+exp3_ATE
+
+# ATE for Treatment condition: 8
+
+# Photo - Views
+exp3_means_df <- exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Views)) %>%
+  as.data.frame()
+
+exp3_ATE <- exp3_means_df[2, 2] - exp3_means_df[1,2]
+exp3_ATE
+
+# combined effect
+exp3_means_df <- exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(combined_effect)) %>%
+  as.data.frame()
+
+exp3_ATE <- exp3_means_df[2, 2] - exp3_means_df[1,2]
+exp3_ATE
+
+
+# ATE for Treatment condition: 8
+
+# 6) Regression
+
+# CHECK: response is dependent on condition and views? or should be separated
+summary(lm(Response ~ Condition + Views, data=exp3_df))
+
+# You can model a t.test as a simple linear regression with
+# a dummy-coded variable for the condition factor. 
+
+# This is equivalent to a two-sample T-test
+t.test(exp3_df$Response ~ exp3_df$Condition, var.equal = TRUE)
+
+# You can relax this assumption by removing the var.equal argument. 
+t.test(exp3_df$Response ~ exp3_df$Condition)
+```
+In all cases, results show a significant difference between conditions on the response count. Regression output shows the coefficient for condition is significantly different from 0, t(18) = 6.908, p = 0.018503. 
+
+(7) Modeling
+We used an independent groups T-Test to support the experiment of assigning subjects (cities) to condition. With Condition as a 2-level categorical factor (Control vs Treatment). The control condition had a bad photo and single line description, whereas the treatment condition had a good photo and full description. Response count was our dependent variable. 
+
+```{r}
+# 8) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+m1 <- lm(Response ~ Condition, data = exp3_df)
+m1.vcovHC <- vcovHC(m1)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(m1, vcov = m1.vcovHC)
+
+# To print more nicely,  we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(m1.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(m1, vcov = vcovHC(m1, type = "const"))
+r2 <- coeftest(m1, vcov = vcovHC(m1, type = "HC3"))
+stargazer(r1, r2, type = "text")
+```
+#### Non-parametric for test on counts
+Mann-Whitney U-test tests if counts in one group tend to be higher than counts in another group. Given our sample size is low here (10). We cannot be confident our T statistics calculated with parametric tests are reliable. Furthermore, with count data, often it is Poisson-distributed, so it may be preferred to relax the normality assumption of the T-test. 
+```{r}
+# A non-parametric test alternative therefore may be preferred. 
+wilcox.test(exp3_df[exp3_df$Condition == 'Control', 'Response'],
+            exp3_df[exp3_df$Condition == 'Treatment', 'Response'])
+
+# Results show a significant difference in counts between conditions
+# W = 23.5, p = 0.04868.
+```
+#### Poisson
+```{r}
+# 1) Statistical Power
+pos.mod <- glm(Response ~ Condition, data=exp3_df, family=poisson)
+summary(pos.mod)
+```
+Caution: power tests here assume a R2 value.Since Poisson doesn't produce R2, we use a pseudo-R2, 1-(Residual Deviance/Null Deviance). Ref: (https://stats.stackexchange.com/questions/11676/pseudo-r-squared-formula-for-glms)
+```{r}
+pseudo_r2 <- 1-(54.521/76.879)
+effect.size <- pseudo_r2/(1-pseudo_r2)
+pwr.f2.test(u=1, v=18, f2=effect.size, sig.level = .05)
+```
+
+Power is 0.7728986.
+
+```{r}
+# 2) Observation from control group
+exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response),
+            sd = sd(Response))
+```
+The control group (normal descriptions with typo)had an average response count of 10.5 and standard deviation of 1.96. 
+
+(3) Baseline model
+In this Poisson regression we have one hypothesis
+Null hypothesis: there are no significant differences in response count to Craigslist camera lens ads between ads descriptions that have a typo vs don't. 
+
+```{r}
+# 4) ATE analysis
+exp3_means_df <- exp3_df %>%
+  group_by(Condition) %>%
+  summarize(avg = mean(Response)) %>%
+  as.data.frame()
+
+exp3_ATE <- exp3_means_df[2, 2] - exp3_means_df[1,2]
+exp3_ATE
+# ATE for Treatment condition: 8
+
+# 6) Regression
+pos.mod <- glm(Response ~ Condition, data=exp3_df, family=poisson)
+summary(pos.mod)
+
+```
+You can model the experiment as a generalized linear model (GLM) with a dummy-coded variables for the condition factor. Here, in R we specify the outcome is Poisson distributed as is a common error distribution for integer count data
+```{r}
+# There is a significant effect of condition in this model. 
+# z = 4.636, p = 0.00000356
+library(AER)
+dispersiontest(pos.mod,trafo=1)
+
+# There is marginal overdispersion, but not significant.
+
+```
+(7)) Modeling
+With Condition as a 2-level categorical factor (Control vs Treatment). Response count was our dependent variable. We specified the error distribution to be Poisson, and chose a logarithm as the link function. In other words, the mean of the response is mapped to the linear combination of features via the logarithm function. 
+
+```{r}
+# 8) Calculate f1 score and robust standard error
+
+# We are using the `vcovHC` function from the library `sandwich`
+# to estimate the white heteroskedastic-consistent standard errors
+pos.mod.vcovHC <- vcovHC(pos.mod)  # from library(sandwich)
+
+# With these, we can use the `coeftest` function from the `lmtest`
+# package to perform hypothesis tests.
+# these are the `robust` standard errors. 
+coeftest(pos.mod, vcov = pos.mod.vcovHC)
+
+# To print more nicely, we are taking the square-root of the diagonals
+# of this heteroskedastic consistent variance covariance matrix, which
+# provides the standard errors for each of the coefficients.
+rse1 <- sqrt(diag(pos.mod.vcovHC))
+rse1
+
+# Compares robust vs non-robust standard errors
+r1 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "const"))
+r2 <- coeftest(pos.mod, vcov = vcovHC(pos.mod, type = "HC3"))
+stargazer(r1, r2, type = "text")
+
+
+```
